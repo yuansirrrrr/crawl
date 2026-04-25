@@ -14,6 +14,23 @@ logger = logging.getLogger(__name__)
 DOUYIN_PROFILE_DIR = Path(__file__).parent.parent.parent.parent / "browser_data" / "douyin_profile"
 
 
+def _parse_cookie_string(cookie_str: str) -> list[dict]:
+    cookies = []
+    for part in cookie_str.split(";"):
+        part = part.strip()
+        if "=" in part:
+            name, _, value = part.partition("=")
+            cookies.append({
+                "name": name.strip(),
+                "value": value.strip(),
+                "domain": ".douyin.com",
+                "path": "/",
+                "httpOnly": False,
+                "secure": False,
+            })
+    return cookies
+
+
 def _extract_video_url(video_info: dict) -> str:
     """Select the best video download URL."""
     play_addr = video_info.get("play_addr", {})
@@ -56,6 +73,11 @@ async def search_douyin(
             accept_downloads=True,
         )
         page = context.pages[0] if context.pages else await context.new_page()
+
+        # Inject cookies from config before navigation
+        if settings.DOUYIN_COOKIES:
+            await context.add_cookies(_parse_cookie_string(settings.DOUYIN_COOKIES))
+            logger.debug("Cookies injected from config")
 
         # Visit douyin.com to establish session
         await page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=30000)

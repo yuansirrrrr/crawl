@@ -8,6 +8,7 @@ load_dotenv()
 
 class Settings:
     DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
+    DOUYIN_COOKIES: str = os.getenv("DOUYIN_COOKIES", "")
     PLAYWRIGHT_HEADLESS: bool = os.getenv("PLAYWRIGHT_HEADLESS", "false").lower() == "true"
     MAX_RESULTS_PER_PLATFORM: int = int(os.getenv("MAX_RESULTS", "5"))
     SEARCH_TIMEOUT: int = int(os.getenv("SEARCH_TIMEOUT", "60"))
