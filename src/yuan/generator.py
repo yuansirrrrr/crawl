@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import datetime
 from urllib.parse import quote as urlquote
 
+import requests
 from bs4 import BeautifulSoup
 
 from yuan.llm import get_llm
@@ -14,6 +15,13 @@ from yuan.llm import get_llm
 logger = logging.getLogger(__name__)
 
 DOWNLOADS_DIR = Path(__file__).parent.parent.parent / "downloads"
+
+_HTML_SESSION = requests.Session()
+_HTML_SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+})
 
 HTML_GENERATOR_PROMPT = """你是一个前端网页设计师和内容编辑。请根据以下素材，为一个中文用户生成一个精美的单页 HTML 网页。
 
@@ -34,7 +42,7 @@ HTML_GENERATOR_PROMPT = """你是一个前端网页设计师和内容编辑。�
    - 返回顶部按钮（页面滚动一定距离后出现）
    - 页面加载时有简单的渐入动画效果
 6. 样式要求：现代简洁、中文友好、适配移动端、有良好的间距和层级感
-7. 视频路径使用素材中提供的相对路径（从 downloads/ 开始），嵌入到 <video> 的 src 中
+7. 视频路径使用下面素材中提供的 src_path 值，直接作为 <video> 的 src（已经是相对于 HTML 文件的正确路径）
 8. 只输出 HTML 代码，不要输出其他任何内容。不要用 Markdown 代码块包裹。
 
 ## 素材
@@ -46,107 +54,27 @@ HTML_GENERATOR_PROMPT = """你是一个前端网页设计师和内容编辑。�
 {article_summaries}"""
 
 
-def _extract_article_text(html_path: Path) -> str:
-    """从微信 HTML 文件中提取正文纯文本。"""
-    html = html_path.read_text(encoding="utf-8")
-    soup = BeautifulSoup(html, "html.parser")
-    content = soup.select_one("div.rich_media_content")
-    if content:
-        return content.get_text(separator="\n", strip=True)
-    return soup.get_text(separator="\n", strip=True)
-
-
-def _load_article_url(html_path: Path, wechat_dir: Path) -> str:
-    """优先从同名 JSON 元数据文件中读取原文 URL，回退到从 HTML 中提取。"""
-    json_path = html_path.with_suffix(".json")
-    if json_path.exists():
-        try:
-            meta = json.loads(json_path.read_text(encoding="utf-8"))
-            url = meta.get("url", "")
-            if url and "mp.weixin.qq.com" in url:
-                return url
-        except Exception:
-            pass
-    return _extract_article_url(html_path)
-
-
-def _extract_article_url(html_path: Path) -> str:
-    """从微信 HTML 文件中提取原始文章链接。"""
-    html = html_path.read_text(encoding="utf-8")
-
-    # 优先从微信文章 JS 变量中构造永久链接
-    biz = re.search(r'var\s+biz\s*=\s*["\']([^"\']+)["\']', html)
-    mid = re.search(r'var\s+mid\s*=\s*["\']([^"\']+)["\']', html)
-    idx = re.search(r'var\s+idx\s*=\s*["\']([^"\']+)["\']', html)
-    sn = re.search(r'var\s+sn\s*=\s*["\']([^"\']+)["\']', html)
-    if biz and mid and idx:
-        biz_val = biz.group(1)
-        mid_val = mid.group(1)
-        idx_val = idx.group(1)
-        sn_val = sn.group(1) if sn else ""
-        if biz_val and mid_val and idx_val:
-            url = f"https://mp.weixin.qq.com/s?__biz={biz_val}&mid={mid_val}&idx={idx_val}"
-            if sn_val:
-                url += f"&sn={sn_val}"
-            url += "#wechat_redirect"
-            return url
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    # 查找 meta 标签中的原文链接 (og:url)
-    og_url = soup.find("meta", property="og:url")
-    if og_url and og_url.get("content"):
-        return og_url["content"]
-
-    # 查找 meta 标签中的 article:url
-    article_url = soup.find("meta", property="article:url")
-    if article_url and article_url.get("content"):
-        return article_url["content"]
-
-    # 查找 id="js_share_link" 或 class="share_link" 的 a 标签
-    share_link = soup.find("a", id="js_share_link") or soup.find("a", class_="share_link")
-    if share_link and share_link.get("href"):
-        href = share_link["href"]
-        if not href.startswith("http"):
-            href = "https://mp.weixin.qq.com" + href
-        return href
-
-    # 从 script 标签中提取 msg_link 或 var msgLink
-    scripts = soup.find_all("script")
-    for script in scripts:
-        if script.string:
-            for pattern in [
-                r'msg_link\s*[=:]\s*["\']([^"\']+)["\']',
-                r'var\s+msgLink\s*=\s*["\']([^"\']+)["\']',
-                r'"msg_link"\s*:\s*["\']([^"\']+)["\']',
-            ]:
-                match = re.search(pattern, script.string)
-                if match:
-                    return match.group(1)
-
-    # 从 window.location 或 window.__wxWebEnv 中提取
-    for script in scripts:
-        if script.string:
-            match = re.search(r'window\.location\.href\s*=\s*["\']([^"\']+)["\']', script.string)
-            if match:
-                url = match.group(1)
-                if "mp.weixin.qq.com" in url:
-                    return url
-
-    # 查找带有 .mp.weixin.qq.com 的链接
-    links = soup.find_all("a", href=True)
-    for link in links:
-        href = link.get("href", "")
-        if "mp.weixin.qq.com" in href and ("/s?" in href or "/page/" in href):
-            return href
-
-    return ""
+def _fetch_article_text_from_url(url: str) -> str:
+    """从微信文章 URL 实时获取全文纯文本。"""
+    if not url or not url.startswith("http"):
+        return ""
+    try:
+        resp = _HTML_SESSION.get(url, headers={"Referer": "https://mp.weixin.qq.com/"}, timeout=15, allow_redirects=True)
+        resp.encoding = "utf-8"
+        soup = BeautifulSoup(resp.text, "html.parser")
+        content = soup.select_one("div.rich_media_content")
+        if content:
+            return content.get_text(separator="\n", strip=True)
+        return soup.get_text(separator="\n", strip=True)
+    except Exception as e:
+        logger.error(f"Failed to fetch article from {url}: {e}")
+        return ""
 
 
 def _collect_topics() -> dict[str, list[dict]]:
     """扫描 downloads/ 目录，按话题名分组素材。
 
-    返回 {topic_name: [{"type": "douyin"/"wechat", "path": Path, "title": str, ...}]}
+    返回 {topic_name: [{"type": "douyin"/"wechat", "url": str, "title": str, ...}]}
     """
     if not DOWNLOADS_DIR.exists():
         return {}
@@ -156,7 +84,6 @@ def _collect_topics() -> dict[str, list[dict]]:
     for dirpath in sorted(DOWNLOADS_DIR.iterdir()):
         if not dirpath.is_dir():
             continue
-        # 话题名格式: 话题_时间戳
         match = re.match(r"^(.+?)_\d{8}_\d{6}$", dirpath.name)
         if not match:
             continue
@@ -169,34 +96,40 @@ def _collect_topics() -> dict[str, list[dict]]:
         douyin_dir = dirpath / "douyin"
         if douyin_dir.exists():
             for f in sorted(douyin_dir.glob("*.mp4")):
-                # 相对于当前话题目录的路径
-                rel_path = os.path.relpath(f, dirpath).replace("\\", "/")
+                # HTML 保存在 downloads/，所以路径要包含话题目录名
+                rel_path = os.path.relpath(f, DOWNLOADS_DIR).replace("\\", "/")
                 topics[topic_name].append({
                     "type": "douyin",
                     "path": f,
                     "title": f.stem,
-                    "rel_path": rel_path,
+                    "src_path": rel_path,
                 })
 
-        # 收集文章
+        # 收集文章（从 JSON 元数据读取 URL）
         wechat_dir = dirpath / "wechat"
         if wechat_dir.exists():
-            for f in sorted(wechat_dir.glob("*.html")):
-                text = _extract_article_text(f)
-                article_url = _load_article_url(f, wechat_dir)
+            for f in sorted(wechat_dir.glob("*.json")):
+                try:
+                    meta = json.loads(f.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
                 topics[topic_name].append({
                     "type": "wechat",
                     "path": f,
-                    "title": f.stem,
-                    "text": text,
-                    "url": article_url,
+                    "title": meta.get("title", f.stem),
+                    "url": meta.get("url", ""),
                 })
 
     return topics
 
 
-async def _summarize_article(title: str, text: str) -> str:
-    """用 LLM 概括一篇文章的核心内容。"""
+async def _summarize_article(title: str, url: str) -> str:
+    """从 URL 实时获取文章全文，然后用 LLM 概括。"""
+    text = _fetch_article_text_from_url(url)
+    if not text:
+        logger.warning(f"No text extracted from article: {title}")
+        return "暂无可获取的全文内容。"
+
     llm = get_llm()
     prompt = f"""你是一位资深的内容分析师，擅长深度阅读和提炼文章核心信息。请对以下文章进行全面、详细的摘要。
 
@@ -225,15 +158,12 @@ async def _generate_html_with_llm(
     summaries: dict[str, str],
 ) -> str:
     """调用 LLM 生成完整的 HTML 页面。"""
-    # 构建视频列表描述
     video_lines = []
     for v in videos:
-        # URL-encode path for HTML src (# and spaces break URL parsing)
-        encoded_path = urlquote(v["rel_path"], safe="/")
-        video_lines.append(f"- 标题: {v['title']} | 相对路径(从 downloads/ 开始): {encoded_path}")
+        encoded_path = urlquote(v["src_path"], safe="/")
+        video_lines.append(f"- 标题: {v['title']} | src_path: {encoded_path}")
     video_list_text = "\n".join(video_lines) if video_lines else "无视频素材"
 
-    # 构建文章摘要描述（包含标题、摘要、原文链接）
     article_lines = []
     for a in articles:
         summary = summaries.get(a["title"], "暂无摘要")
@@ -253,7 +183,6 @@ async def _generate_html_with_llm(
     resp = await llm.ainvoke(prompt)
     html = resp.content
 
-    # 清理可能包裹的 Markdown 代码块
     html = re.sub(r"^```html?\s*\n", "", html)
     html = re.sub(r"\n```\s*$", "", html)
     html = html.strip()
@@ -277,11 +206,11 @@ async def generate_all() -> list[str]:
         if not videos and not articles:
             continue
 
-        # 对每篇文章做 LLM 摘要概括（并发执行）
+        # 并发获取文章全文并生成摘要
         if articles:
             logger.info(f"Summarizing {len(articles)} articles...")
             tasks = [
-                _summarize_article(a["title"], a.get("text", ""))
+                _summarize_article(a["title"], a.get("url", ""))
                 for a in articles
             ]
             summary_results = await asyncio.gather(*tasks)
@@ -289,7 +218,6 @@ async def generate_all() -> list[str]:
         else:
             summaries = {}
 
-        # 用 LLM 生成 HTML 页面
         logger.info(f"Generating HTML for topic: {topic_name}")
         try:
             html_content = await _generate_html_with_llm(topic_name, videos, articles, summaries)
@@ -297,18 +225,8 @@ async def generate_all() -> list[str]:
             logger.error(f"LLM HTML generation failed for {topic_name}: {e}")
             continue
 
-        # 保存到最早的话题目录
-        topic_dirs = sorted([
-            d for d in DOWNLOADS_DIR.iterdir()
-            if d.is_dir() and d.name.startswith(f"{topic_name}_")
-        ], key=lambda d: d.name)
-        if topic_dirs:
-            target_dir = topic_dirs[0]
-        else:
-            target_dir = DOWNLOADS_DIR
-
         safe_name = topic_name.replace("/", "_").replace("\\", "_")
-        output_path = target_dir / f"{safe_name}_汇总_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+        output_path = DOWNLOADS_DIR / f"{safe_name}_汇总_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
         output_path.write_text(html_content, encoding="utf-8")
         output_paths.append(str(output_path))
         logger.info(f"Generated: {output_path}")

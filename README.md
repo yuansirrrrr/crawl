@@ -1,7 +1,7 @@
 # Yuan
 
 对话式内容搜索工具：输入话题后，AI 自动搜索抖音和微信公众号相关内容，
-下载视频/文章到本地，并合成摘要。
+下载视频/文章到本地，退出时生成汇总网页（嵌入视频播放器 + 文章摘要 + 原文链接）。
 
 ## 架构
 
@@ -15,11 +15,12 @@
                     │               │
               抖音 API 调用     搜狗微信搜索
                     │               │
-              httpx 下载 mp4   下载 HTML 文章
+              httpx 下载 mp4   解析链接，保存 JSON 元数据
                     │               │
                     └───────┬───────┘
                             │
                     DeepSeek 合成摘要
+                    LLM 生成汇总 HTML
 ```
 
 ### 核心模块
@@ -29,20 +30,29 @@
   - 用 `page.evaluate()` 在浏览器上下文中调用 `fetch()` 请求抖音搜索 API
     （`/aweme/v1/web/general/search/single/`），绕过签名校验
   - 解析返回的 JSON（含干扰字符），提取视频元数据和 CDN 直链
-  - 用 httpx 下载视频，以标题命名保存
+  - 用 httpx 下载视频，以标题命名保存到 `downloads/`
 - **`src/yuan/scraper/wechat.py`** — 微信文章搜索
   - 通过 requests 请求搜狗微信搜索页面
   - BeautifulSoup 解析提取标题、链接、摘要
-  - 访问文章页（`mp.weixin.qq.com`），保留原始 HTML
-  - 处理懒加载图片（`data-src` → `src`）
+  - 解析搜狗跳转链接，提取实际 `mp.weixin.qq.com` URL
+  - 保存文章元数据（标题、作者、原文 URL）为 JSON 文件
 - **`src/yuan/tools.py`** — LangChain 工具
   - 将抖音/微信搜索函数封装为 `@tool`，供 LLM 调用
-  - 返回格式化文本（标题、作者、本地路径）
+  - 抖音通过 `seen_ids` 去重（按 `aweme_id`），避免重复下载
+  - 微信通过 `offset` 分页偏移量去重，避免重复抓取同一条搜索结果
 - **`src/yuan/agent.py`** — LangGraph ReAct Agent
   - 使用 `create_react_agent` 构建 function calling agent
-  - 系统提示词引导 LLM 按需调用搜索工具，并综合结果生成摘要
+  - 系统提示词引导 LLM 按需调用搜索工具，并综合结果生成回复
+- **`src/yuan/generator.py`** — 汇总网页生成（退出时自动调用）
+  - 扫描 `downloads/` 目录，按话题前缀分组素材
+  - 从微信文章 URL 实时获取全文（`requests` + BeautifulSoup）
+  - 并发调用 LLM 对每篇文章生成详细摘要
+  - LLM 根据视频列表和文章摘要生成完整的汇总 HTML 页面
+    - 视频用 `<video controls>` 本地嵌入播放
+    - 文章显示标题、LLM 摘要、"阅读原文"跳转链接
+    - 支持导航锚点跳转、视频网格/列表切换、返回顶部、渐入动画
 - **`src/yuan/cli.py`** — 终端入口
-  - `uv run yuan chat` — 启动对话
+  - `uv run yuan chat` — 启动对话，退出时自动生成汇总网页
   - `uv run yuan serve` — 启动 FastAPI 服务
 
 ## 安装
@@ -98,6 +108,9 @@ uv run yuan chat
 - "只看抖音，搜索机器学习"
 - "搜一下新能源车，要15条"
 
+**输入 `exit` 或 `退出` 结束对话**，程序会自动扫描所有已下载的话题，
+生成汇总 HTML 网页到 `downloads/` 目录。
+
 ### API 模式
 
 ```bash
@@ -113,14 +126,22 @@ curl -X POST http://localhost:8000/api/chat \
 
 ```
 downloads/
-└── 话题_20260425_140000/
+├── 话题_汇总_20260426_010000.html    ← 退出时生成的汇总网页
+├── 话题A_20260425_140000/
+│   ├── douyin/
+│   │   ├── 视频标题1.mp4
+│   │   └── 视频标题2.mp4
+│   └── wechat/
+│       ├── 文章标题1.json
+│       └── 文章标题2.json
+└── 话题B_20260426_000426/
     ├── douyin/
-    │   ├── 视频标题1.mp4
-    │   └── 视频标题2.mp4
+    │   └── 视频标题3.mp4
     └── wechat/
-        ├── 文章标题1.html
-        └── 文章标题2.html
+        └── 文章标题3.json
 ```
+
+微信文章元数据以 JSON 格式保存，包含标题、作者、原文 URL、摘要等信息。
 
 ## 常见问题
 
@@ -138,3 +159,8 @@ downloads/
 ### 微信搜索无结果
 
 搜狗搜索偶尔触发验证码，稍后重试即可。
+
+### 汇总网页中视频无法播放
+
+确认 `downloads/` 目录下视频文件未被移动或删除。视频路径使用相对于 `downloads/` 的路径，
+如果文件名中包含 `#`、空格等特殊字符，HTML 中已自动做 URL 编码。

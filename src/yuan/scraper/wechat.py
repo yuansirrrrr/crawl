@@ -30,9 +30,8 @@ def _human_delay(min_s: float = 1.0, max_s: float = 2.5):
 def _sogou_search(keyword: str, max_results: int, offset: int = 0) -> list[dict]:
     """Search WeChat articles via Sogou with pagination, skipping the first `offset` results."""
     articles = []
-    total_seen = 0  # total items iterated across all pages
+    total_seen = 0
     page = 1
-    # need to scan enough pages to skip `offset` items and collect `max_results` new ones
     max_pages = max(3, ((offset + max_results) // 10) + 2)
 
     while len(articles) < max_results and page <= max_pages:
@@ -66,7 +65,6 @@ def _sogou_search(keyword: str, max_results: int, offset: int = 0) -> list[dict]
             if not title_tag:
                 continue
 
-            # skip the first `offset` valid items
             if total_seen < offset:
                 total_seen += 1
                 continue
@@ -94,21 +92,17 @@ def _sogou_search(keyword: str, max_results: int, offset: int = 0) -> list[dict]
 def _resolve_sogou_link(session: requests.Session, sogou_url: str) -> str:
     """Resolve Sogou /link?url=... redirect to actual mp.weixin.qq.com URL."""
     resp = session.get(sogou_url, timeout=15, allow_redirects=True)
-    # Sogou redirect page is usually GBK, but URL extraction doesn't care about encoding
     resp.encoding = resp.apparent_encoding or "gbk"
 
-    # Sogou uses JS to build the real URL — extract it via regex
-    # Pattern: url += 'https://mp.'; url += 'weixin.qq.c'; ...
     parts = re.findall(r"url\s*\+=\s*'([^']+)'", resp.text)
     if parts:
         return "".join(parts)
 
-    # Fallback: look for a direct meta refresh or window.location
     m = re.search(r'window\.location\.href\s*=\s*["\']([^"\']+)["\']', resp.text)
     if m:
         return m.group(1)
 
-    return sogou_url  # give up, return original
+    return sogou_url
 
 
 def _sanitize_filename(title: str) -> str:
@@ -119,38 +113,17 @@ def _sanitize_filename(title: str) -> str:
     return " ".join(title.split())[:80] or "untitled"
 
 
-def _fetch_article(url: str) -> dict:
-    """Fetch a WeChat article page, preserve original HTML with styles."""
-    # Resolve Sogou redirect first
-    if "weixin.sogou.com/link" in url:
-        resolved_url = _resolve_sogou_link(_SESSION, url)
+def _fetch_article_meta(sogou_url: str) -> dict:
+    """Fetch article page via Sogou link, extract metadata and resolve working URL."""
+    if "weixin.sogou.com/link" in sogou_url:
+        resolved_url = _resolve_sogou_link(_SESSION, sogou_url)
     else:
-        resolved_url = url
+        resolved_url = sogou_url
 
     headers = {"Referer": "https://mp.weixin.qq.com/"}
     resp = _SESSION.get(resolved_url, headers=headers, timeout=15, allow_redirects=True)
-    # WeChat articles are always UTF-8
     resp.encoding = "utf-8"
-    raw_html = resp.text
-
-    # Parse only for text extraction, keep raw_html intact for saving
-    soup = BeautifulSoup(raw_html, "html.parser")
-
-    # Resolve lazy-loaded images in both raw HTML and soup
-    # Replace data-src with src in the raw HTML string
-    raw_html = re.sub(r'data-src=', 'src=', raw_html)
-    # Remove data-src attributes (they're now src)
-    raw_html = re.sub(r'\s*data-src="[^"]*"', '', raw_html)
-
-    # Remove visibility:hidden from js_content div so content displays without JS.
-    raw_html = re.sub(
-        r'(<div[^>]*id="js_content"[^>]*)\s+style="[^"]*"',
-        r'\1',
-        raw_html,
-    )
-
-    content_div = soup.select_one("div.rich_media_content")
-    text_content = content_div.get_text(separator="\n", strip=True)[:1000] if content_div else ""
+    soup = BeautifulSoup(resp.text, "html.parser")
 
     title_tag = soup.select_one("#activity-name, .rich_media_title")
     title = title_tag.get_text(strip=True) if title_tag else ""
@@ -158,13 +131,9 @@ def _fetch_article(url: str) -> dict:
     author_tag = soup.select_one("#js_name, .rich_media_meta_nickname")
     author = author_tag.get_text(strip=True) if author_tag else ""
 
-    # The resolved Sogou URL (mp.weixin.qq.com/s?src=...) is the actual working article link
     return {
         "title": title,
         "author": author,
-        "content_html": str(content_div) if content_div else "",
-        "full_html": raw_html,
-        "text_content": text_content,
         "final_url": resolved_url,
     }
 
@@ -176,7 +145,7 @@ def search_wechat(
     seen_titles: set[str] | None = None,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
-    """Search WeChat articles via Sogou using requests, download full HTML.
+    """Search WeChat articles via Sogou, save metadata as JSON.
     `offset` skips the first N Sogou results so successive calls get new articles.
     Returns (results, new_offset).
     """
@@ -194,47 +163,33 @@ def search_wechat(
         wechat_dir = storage_dir / "wechat"
         wechat_dir.mkdir(parents=True, exist_ok=True)
 
-    for i, article in enumerate(articles):
+    for article in articles:
         _human_delay()
         try:
-            fetched = _fetch_article(article["url"])
-            # Only overwrite title/author if fetched values are non-empty
+            fetched = _fetch_article_meta(article["url"])
             if fetched.get("title"):
                 article["title"] = fetched["title"]
             if fetched.get("author"):
                 article["author"] = fetched["author"]
-            article["full_html"] = fetched.get("full_html", "")
-            article["text_content"] = fetched.get("text_content", "")
             article["final_url"] = fetched.get("final_url", article["url"])
         except Exception as e:
             logger.error(f"Failed to fetch article {article['url']}: {e}")
-            article["full_html"] = ""
-            article["text_content"] = article.get("description", "")
             article["error"] = str(e)
 
-        # Save HTML to disk
         local_path = ""
-        meta_path = ""
-        if wechat_dir and article.get("full_html"):
-            safe_name = _sanitize_filename(article.get("title", "untitled"))
-            filepath = wechat_dir / f"{safe_name}.html"
-            filepath.write_text(article["full_html"], encoding="utf-8")
-            local_path = str(filepath)
+        final_url = article.get("final_url", article["url"])
 
-            # Save metadata JSON alongside HTML for reliable URL retrieval
-            final_url = article.get("final_url", article["url"])
+        if wechat_dir:
+            safe_name = _sanitize_filename(article.get("title", "untitled"))
             meta = {
                 "title": article.get("title", ""),
                 "author": article.get("author", article.get("account", "")),
                 "url": final_url,
                 "description": article.get("description", "")[:200],
-                "html_file": local_path,
             }
             meta_file = wechat_dir / f"{safe_name}.json"
             meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-            meta_path = str(meta_file)
-
-        final_url = article.get("final_url", article["url"])
+            local_path = str(meta_file)
 
         results.append({
             "source": "wechat",
@@ -242,10 +197,8 @@ def search_wechat(
             "url": final_url,
             "author": article.get("author", article.get("account", "")),
             "description": article.get("description", "")[:200],
-            "text_content": article.get("text_content", ""),
             "local_path": local_path,
-            "meta_path": meta_path,
-            "file_type": "html",
+            "file_type": "json",
         })
 
     new_offset = offset + len(results)
