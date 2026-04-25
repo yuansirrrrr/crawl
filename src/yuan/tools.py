@@ -8,7 +8,7 @@ from yuan.config import settings
 logger = logging.getLogger(__name__)
 
 _seen_douyin_ids: set[str] = set()
-_seen_wechat_urls: set[str] = set()
+_wechat_offsets: dict[str, int] = {}  # keyword -> total articles fetched so far
 
 
 @tool
@@ -58,20 +58,21 @@ def search_wechat_tool(keyword: str, max_results: int = 5) -> str:
     from yuan.scraper.wechat import search_wechat
 
     storage = settings.storage_dir(keyword)
+    current_offset = _wechat_offsets.get(keyword, 0)
     try:
-        results, skipped = search_wechat(
+        results, new_offset = search_wechat(
             keyword=keyword,
             max_results=max_results,
             storage_dir=storage,
-            seen_urls=_seen_wechat_urls,
+            offset=current_offset,
         )
     except Exception as e:
         logger.error(f"WeChat search failed: {e}")
         return f"微信搜索失败: {e}"
 
+    _wechat_offsets[keyword] = new_offset
+
     if not results:
-        if skipped:
-            return f"微信公众号未找到新文章（已跳过 {skipped} 条重复内容）。"
         return "微信公众号未找到相关文章。"
 
     lines = [f"微信搜索「{keyword}」共找到 {len(results)} 篇文章，已保存至: {storage}"]
@@ -82,7 +83,5 @@ def search_wechat_tool(keyword: str, max_results: int = 5) -> str:
         if text:
             lines.append(f"   摘要: {text}")
         lines.append(f"   路径: {path}")
-    if skipped > 0:
-        lines.append(f"（已跳过 {skipped} 条重复内容）")
     return "\n".join(lines)
 

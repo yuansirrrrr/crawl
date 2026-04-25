@@ -26,12 +26,13 @@ def _human_delay(min_s: float = 1.0, max_s: float = 2.5):
     time.sleep(random.uniform(min_s, max_s))
 
 
-def _sogou_search(keyword: str, max_results: int, seen_urls: set[str] | None = None) -> tuple[list[dict], int]:
-    """Search WeChat articles via Sogou with pagination. Returns (articles, skipped_count)."""
+def _sogou_search(keyword: str, max_results: int, offset: int = 0) -> list[dict]:
+    """Search WeChat articles via Sogou with pagination, skipping the first `offset` results."""
     articles = []
-    skipped = 0
+    total_seen = 0  # total items iterated across all pages
     page = 1
-    max_pages = max(3, (max_results // 10) + 2)
+    # need to scan enough pages to skip `offset` items and collect `max_results` new ones
+    max_pages = max(3, ((offset + max_results) // 10) + 2)
 
     while len(articles) < max_results and page <= max_pages:
         url = f"https://weixin.sogou.com/weixin?type=2&query={quote(keyword)}&ie=utf8&page={page}"
@@ -64,14 +65,16 @@ def _sogou_search(keyword: str, max_results: int, seen_urls: set[str] | None = N
             if not title_tag:
                 continue
 
+            # skip the first `offset` valid items
+            if total_seen < offset:
+                total_seen += 1
+                continue
+
+            total_seen += 1
             title = title_tag.get_text(strip=True)
             href = title_tag.get("href", "")
             if href.startswith("/link?"):
                 href = f"https://weixin.sogou.com{href}"
-
-            if seen_urls is not None and href in seen_urls:
-                skipped += 1
-                continue
 
             articles.append({
                 "title": title,
@@ -84,7 +87,7 @@ def _sogou_search(keyword: str, max_results: int, seen_urls: set[str] | None = N
         if page <= max_pages and len(articles) < max_results:
             _human_delay()
 
-    return articles, skipped
+    return articles
 
 
 def _resolve_sogou_link(session: requests.Session, sogou_url: str) -> str:
@@ -173,19 +176,21 @@ def search_wechat(
     keyword: str,
     max_results: int = 5,
     storage_dir: Path | None = None,
-    seen_urls: set[str] | None = None,
+    seen_titles: set[str] | None = None,
+    offset: int = 0,
 ) -> tuple[list[dict], int]:
     """Search WeChat articles via Sogou using requests, download full HTML.
-    Returns (results, skipped_count).
+    `offset` skips the first N Sogou results so successive calls get new articles.
+    Returns (results, new_offset).
     """
     results = []
 
-    logger.info(f"WeChat search: {keyword}")
-    articles, skipped = _sogou_search(keyword, max_results, seen_urls=seen_urls)
+    logger.info(f"WeChat search: {keyword} offset={offset}")
+    articles = _sogou_search(keyword, max_results, offset=offset)
 
     if not articles:
         logger.warning("WeChat: no articles found from Sogou search")
-        return results, skipped
+        return results, offset
 
     wechat_dir = None
     if storage_dir:
@@ -219,9 +224,6 @@ def search_wechat(
             local_path = str(filepath)
 
         final_url = article.get("final_url", article["url"])
-        if seen_urls is not None:
-            seen_urls.add(final_url)
-            seen_urls.add(article["url"])  # also track the sogou link
 
         results.append({
             "source": "wechat",
@@ -234,4 +236,5 @@ def search_wechat(
             "file_type": "html",
         })
 
-    return results, skipped
+    new_offset = offset + len(results)
+    return results, new_offset
