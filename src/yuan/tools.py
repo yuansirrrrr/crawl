@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from pathlib import Path
 
@@ -7,6 +6,9 @@ from langchain_core.tools import tool
 from yuan.config import settings
 
 logger = logging.getLogger(__name__)
+
+_seen_douyin_ids: set[str] = set()
+_seen_wechat_urls: set[str] = set()
 
 
 @tool
@@ -21,18 +23,27 @@ async def search_douyin_tool(keyword: str, max_results: int = 5) -> str:
 
     storage = settings.storage_dir(keyword)
     try:
-        results = await search_douyin(keyword=keyword, max_results=max_results, storage_dir=storage)
+        results, skipped = await search_douyin(
+            keyword=keyword,
+            max_results=max_results,
+            storage_dir=storage,
+            seen_ids=_seen_douyin_ids,
+        )
     except Exception as e:
         logger.error(f"Douyin search failed: {e}")
         return f"抖音搜索失败: {e}"
 
     if not results:
+        if skipped:
+            return f"抖音未找到新视频（已跳过 {skipped} 条重复内容）。"
         return "抖音未找到相关视频。"
 
     lines = [f"抖音搜索「{keyword}」共找到 {len(results)} 条视频，已保存至: {storage}"]
     for i, r in enumerate(results, 1):
         path = r.get("local_path", "未下载")
         lines.append(f"{i}. 《{r.get('title', '无标题')}》 作者: {r.get('author', '未知')} | {path}")
+    if skipped > 0:
+        lines.append(f"（已跳过 {skipped} 条重复内容）")
     return "\n".join(lines)
 
 
@@ -48,12 +59,19 @@ def search_wechat_tool(keyword: str, max_results: int = 5) -> str:
 
     storage = settings.storage_dir(keyword)
     try:
-        results = search_wechat(keyword=keyword, max_results=max_results, storage_dir=storage)
+        results, skipped = search_wechat(
+            keyword=keyword,
+            max_results=max_results,
+            storage_dir=storage,
+            seen_urls=_seen_wechat_urls,
+        )
     except Exception as e:
         logger.error(f"WeChat search failed: {e}")
         return f"微信搜索失败: {e}"
 
     if not results:
+        if skipped:
+            return f"微信公众号未找到新文章（已跳过 {skipped} 条重复内容）。"
         return "微信公众号未找到相关文章。"
 
     lines = [f"微信搜索「{keyword}」共找到 {len(results)} 篇文章，已保存至: {storage}"]
@@ -64,4 +82,7 @@ def search_wechat_tool(keyword: str, max_results: int = 5) -> str:
         if text:
             lines.append(f"   摘要: {text}")
         lines.append(f"   路径: {path}")
+    if skipped > 0:
+        lines.append(f"（已跳过 {skipped} 条重复内容）")
     return "\n".join(lines)
+

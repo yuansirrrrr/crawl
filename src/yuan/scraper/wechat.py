@@ -26,9 +26,10 @@ def _human_delay(min_s: float = 1.0, max_s: float = 2.5):
     time.sleep(random.uniform(min_s, max_s))
 
 
-def _sogou_search(keyword: str, max_results: int) -> list[dict]:
-    """Search WeChat articles via Sogou with pagination."""
+def _sogou_search(keyword: str, max_results: int, seen_urls: set[str] | None = None) -> tuple[list[dict], int]:
+    """Search WeChat articles via Sogou with pagination. Returns (articles, skipped_count)."""
     articles = []
+    skipped = 0
     page = 1
     max_pages = max(3, (max_results // 10) + 2)
 
@@ -68,6 +69,10 @@ def _sogou_search(keyword: str, max_results: int) -> list[dict]:
             if href.startswith("/link?"):
                 href = f"https://weixin.sogou.com{href}"
 
+            if seen_urls is not None and href in seen_urls:
+                skipped += 1
+                continue
+
             articles.append({
                 "title": title,
                 "url": href,
@@ -79,7 +84,7 @@ def _sogou_search(keyword: str, max_results: int) -> list[dict]:
         if page <= max_pages and len(articles) < max_results:
             _human_delay()
 
-    return articles
+    return articles, skipped
 
 
 def _resolve_sogou_link(session: requests.Session, sogou_url: str) -> str:
@@ -164,16 +169,23 @@ def _fetch_article(url: str) -> dict:
     }
 
 
-def search_wechat(keyword: str, max_results: int = 5, storage_dir: Path | None = None) -> list[dict]:
-    """Search WeChat articles via Sogou using requests, download full HTML."""
+def search_wechat(
+    keyword: str,
+    max_results: int = 5,
+    storage_dir: Path | None = None,
+    seen_urls: set[str] | None = None,
+) -> tuple[list[dict], int]:
+    """Search WeChat articles via Sogou using requests, download full HTML.
+    Returns (results, skipped_count).
+    """
     results = []
 
     logger.info(f"WeChat search: {keyword}")
-    articles = _sogou_search(keyword, max_results)
+    articles, skipped = _sogou_search(keyword, max_results, seen_urls=seen_urls)
 
     if not articles:
         logger.warning("WeChat: no articles found from Sogou search")
-        return results
+        return results, skipped
 
     wechat_dir = None
     if storage_dir:
@@ -206,10 +218,15 @@ def search_wechat(keyword: str, max_results: int = 5, storage_dir: Path | None =
             filepath.write_text(article["full_html"], encoding="utf-8")
             local_path = str(filepath)
 
+        final_url = article.get("final_url", article["url"])
+        if seen_urls is not None:
+            seen_urls.add(final_url)
+            seen_urls.add(article["url"])  # also track the sogou link
+
         results.append({
             "source": "wechat",
             "title": article.get("title", ""),
-            "url": article.get("final_url", article["url"]),
+            "url": final_url,
             "author": article.get("author", article.get("account", "")),
             "description": article.get("description", "")[:200],
             "text_content": article.get("text_content", ""),
@@ -217,4 +234,4 @@ def search_wechat(keyword: str, max_results: int = 5, storage_dir: Path | None =
             "file_type": "html",
         })
 
-    return results
+    return results, skipped

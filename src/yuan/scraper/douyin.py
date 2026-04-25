@@ -30,10 +30,20 @@ def _extract_video_url(video_info: dict) -> str:
     return candidates[0]
 
 
-async def search_douyin(keyword: str, max_results: int = 5, storage_dir: Path | None = None) -> list[dict]:
-    """Search Douyin via Playwright browser API call, download videos."""
+async def search_douyin(
+    keyword: str,
+    max_results: int = 5,
+    storage_dir: Path | None = None,
+    seen_ids: set[str] | None = None,
+) -> tuple[list[dict], int]:
+    """Search Douyin via Playwright browser API call, download videos.
+    Returns (results, skipped_count).
+    """
     results = []
-    seen_ids = set()
+    skipped = 0
+    _external_seen = seen_ids is not None
+    if seen_ids is None:
+        seen_ids = set()
 
     DOUYIN_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -111,7 +121,11 @@ async def search_douyin(keyword: str, max_results: int = 5, storage_dir: Path | 
                             continue
 
                         aweme_id = str(aweme.get("aweme_id", ""))
-                        if not aweme_id or aweme_id in seen_ids:
+                        if not aweme_id:
+                            continue
+                        if aweme_id in seen_ids:
+                            if _external_seen:
+                                skipped += 1
                             continue
                         seen_ids.add(aweme_id)
 
@@ -163,7 +177,7 @@ async def search_douyin(keyword: str, max_results: int = 5, storage_dir: Path | 
                 logger.error(f"Failed to download Douyin video: {e}")
                 r["error"] = str(e)
 
-    return results
+    return results, skipped
 
 
 def _sanitize_filename(title: str) -> str:
