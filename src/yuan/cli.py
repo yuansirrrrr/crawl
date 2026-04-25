@@ -33,6 +33,14 @@ def chat():
             break
 
         if user_input.strip().lower() in ("exit", "quit", "退出"):
+            typer.secho("\n正在生成汇总网页...", fg=typer.colors.GREEN)
+            from yuan.generator import generate_all
+            paths = asyncio.run(generate_all())
+            if paths:
+                for p in paths:
+                    typer.secho(f"  已生成: {p}", fg=typer.colors.CYAN)
+            else:
+                typer.secho("  未找到可汇总的内容。", fg=typer.colors.YELLOW)
             break
 
         history.append(HumanMessage(content=user_input))

@@ -1,3 +1,4 @@
+import json
 import re
 import time
 import random
@@ -122,10 +123,12 @@ def _fetch_article(url: str) -> dict:
     """Fetch a WeChat article page, preserve original HTML with styles."""
     # Resolve Sogou redirect first
     if "weixin.sogou.com/link" in url:
-        url = _resolve_sogou_link(_SESSION, url)
+        resolved_url = _resolve_sogou_link(_SESSION, url)
+    else:
+        resolved_url = url
 
     headers = {"Referer": "https://mp.weixin.qq.com/"}
-    resp = _SESSION.get(url, headers=headers, timeout=15, allow_redirects=True)
+    resp = _SESSION.get(resolved_url, headers=headers, timeout=15, allow_redirects=True)
     # WeChat articles are always UTF-8
     resp.encoding = "utf-8"
     raw_html = resp.text
@@ -140,13 +143,6 @@ def _fetch_article(url: str) -> dict:
     raw_html = re.sub(r'\s*data-src="[^"]*"', '', raw_html)
 
     # Remove visibility:hidden from js_content div so content displays without JS.
-    # We target the style attribute on the js_content div and remove it entirely.
-    raw_html = re.sub(
-        r'(<div[^>]*id="js_content"[^>]*)\s+style="[^"]*"[^>]*>',
-        lambda m: m.group(0).replace(' style="' + re.search(r'style="([^"]*)"', m.group(0)).group(1) + '"', ''),
-        raw_html,
-    )
-    # Simpler: just remove style attr from js_content div
     raw_html = re.sub(
         r'(<div[^>]*id="js_content"[^>]*)\s+style="[^"]*"',
         r'\1',
@@ -162,13 +158,14 @@ def _fetch_article(url: str) -> dict:
     author_tag = soup.select_one("#js_name, .rich_media_meta_nickname")
     author = author_tag.get_text(strip=True) if author_tag else ""
 
+    # The resolved Sogou URL (mp.weixin.qq.com/s?src=...) is the actual working article link
     return {
         "title": title,
         "author": author,
         "content_html": str(content_div) if content_div else "",
         "full_html": raw_html,
         "text_content": text_content,
-        "final_url": resp.url,
+        "final_url": resolved_url,
     }
 
 
@@ -215,13 +212,27 @@ def search_wechat(
             article["text_content"] = article.get("description", "")
             article["error"] = str(e)
 
-        # Save HTML to disk (use article title as filename)
+        # Save HTML to disk
         local_path = ""
+        meta_path = ""
         if wechat_dir and article.get("full_html"):
             safe_name = _sanitize_filename(article.get("title", "untitled"))
             filepath = wechat_dir / f"{safe_name}.html"
             filepath.write_text(article["full_html"], encoding="utf-8")
             local_path = str(filepath)
+
+            # Save metadata JSON alongside HTML for reliable URL retrieval
+            final_url = article.get("final_url", article["url"])
+            meta = {
+                "title": article.get("title", ""),
+                "author": article.get("author", article.get("account", "")),
+                "url": final_url,
+                "description": article.get("description", "")[:200],
+                "html_file": local_path,
+            }
+            meta_file = wechat_dir / f"{safe_name}.json"
+            meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            meta_path = str(meta_file)
 
         final_url = article.get("final_url", article["url"])
 
@@ -233,6 +244,7 @@ def search_wechat(
             "description": article.get("description", "")[:200],
             "text_content": article.get("text_content", ""),
             "local_path": local_path,
+            "meta_path": meta_path,
             "file_type": "html",
         })
 
