@@ -72,7 +72,7 @@ uv run python fetch_cookies.py
 ```
 
 浏览器窗口会打开，进入抖音页面。如果已登录直接按 Enter；
-如果没有登录，先扫码或手机号登录，完成后按 Enter。
+如果没有登录，先扫码或手机号登录，完成后，可以在页面停留一些时间，按 Enter。
 Session 保存后，后续搜索会自动使用保存的 session。
 
 ## 使用
